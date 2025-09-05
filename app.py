@@ -1,43 +1,80 @@
 import streamlit as st
 import pandas as pd
-from pathlib import Path
+import requests
+import json
 import tempfile
+from pathlib import Path
 from convert import convert_excel_to_glossary
 
-st.set_page_config(page_title="Excel → CSV Converter", layout="centered")
+# ===== Config OpenMetadata =====
+OPENMETADATA_URL = st.secrets["OPENMETADATA_URL"]
+TOKEN = st.secrets["TOKEN"]
+GLOSSARY_ID = st.secrets["GLOSSARY_ID"]
 
-st.title("📑 Excel Glossary → CSV Converter")
-st.write("Upload file Excel glossary và tải về file CSV chuẩn cho OpenMetadata.")
+headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json"
+}
 
-# Upload Excel file
-uploaded_file = st.file_uploader("Chọn file Excel", type=["xlsx", "xls"])
+# ===== Function import terms =====
+def import_glossary_terms(csv_file, glossary_id):
+    df = pd.read_csv(csv_file)
+    results = []
+    for _, row in df.iterrows():
+        term = {
+            "name": row["name*"],
+            "displayName": row.get("displayName", ""),
+            "description": row.get("description", ""),
+            "glossary": {
+                "id": glossary_id,
+                "type": "glossary"
+            }
+        }
+        # Nếu có parent → cần xử lý mapping sang ID thật
+        if row.get("parent"):
+            term["parent"] = {
+                "id": row["parent"],
+                "type": "glossaryTerm"
+            }
 
-if uploaded_file is not None:
-    st.success(f"Đã tải lên: {uploaded_file.name}")
+        res = requests.post(
+            f"{OPENMETADATA_URL}/glossaryTerms",
+            headers=headers,
+            data=json.dumps(term)
+        )
+        if res.status_code in (200, 201):
+            results.append((row["name*"], "✅ Imported"))
+        else:
+            results.append((row["name*"], f"❌ {res.text}"))
+    return results
 
-    # Nút chạy convert
-    if st.button("Convert to CSV"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            src = Path(tmpdir) / uploaded_file.name
-            out_csv = Path(tmpdir) / (src.stem + "_converted.csv")
 
-            # Lưu file Excel tạm
-            with open(src, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+# ===== Streamlit UI =====
+st.set_page_config(page_title="Excel → OpenMetadata Glossary (Multi-files)", layout="centered")
+st.title("📑 Excel Glossary → OpenMetadata Importer (Multi-files)")
 
-            # Gọi hàm convert trong convert.py
-            convert_excel_to_glossary(src, out_csv)
+uploaded_files = st.file_uploader("Chọn nhiều file Excel", type=["xlsx", "xls"], accept_multiple_files=True)
 
-            # Hiển thị preview
-            df_preview = pd.read_csv(out_csv)
-            st.subheader("📊 Preview kết quả (5 dòng đầu)")
-            st.dataframe(df_preview.head())
+if uploaded_files:
+    st.info(f"Đã tải lên {len(uploaded_files)} file")
 
-            # Cho tải về file CSV
-            with open(out_csv, "rb") as f:
-                st.download_button(
-                    label="⬇️ Tải CSV",
-                    data=f,
-                    file_name=out_csv.name,
-                    mime="text/csv"
-                )
+    if st.button("Convert & Import tất cả"):
+        for uploaded_file in uploaded_files:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                src = Path(tmpdir) / uploaded_file.name
+                out_csv = Path(tmpdir) / (src.stem + "_converted.csv")
+
+                # Save Excel tạm
+                with open(src, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                # Convert sang CSV
+                convert_excel_to_glossary(src, out_csv)
+
+                # Import vào OpenMetadata
+                results = import_glossary_terms(out_csv, GLOSSARY_ID)
+
+                # Hiển thị kết quả từng file
+                st.subheader(f"📊 Kết quả cho file: {uploaded_file.name}")
+                for name, status in results:
+                    st.write(f"- {name}: {status}")
